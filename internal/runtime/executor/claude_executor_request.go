@@ -1212,6 +1212,9 @@ func applyClaudeHeadersWithNativeProfile(
 	} else {
 		helps.ApplyClaudeLegacyDeviceHeaders(r, incomingHeaders, cfg, confirmedClaudeCode)
 	}
+	if fp.AuthIsOAuthToken && !confirmedClaudeCode && isClaudeOpus5Model(gjson.GetBytes(body, "model").String()) && hasClaudeAgentSDKEnvelope(body) {
+		r.Header.Set("User-Agent", strings.Replace(r.Header.Get("User-Agent"), "(external, cli)", "(external, sdk-cli)", 1))
+	}
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes

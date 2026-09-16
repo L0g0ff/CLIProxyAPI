@@ -293,6 +293,8 @@ func claudeCCHFallbackBillingHeader(ctx context.Context, cfg *config.Config, pay
 }
 
 const claudeCodeCLIIdentity = "You are Claude Code, Anthropic's official CLI for Claude."
+const claudeAgentSDKIdentity = "You are a Claude agent, built on Anthropic's Claude Agent SDK."
+const claudeAgentSDKSystemPrefix = "\nYou are an interactive agent that helps users with software engineering tasks."
 
 const claudeCodeFableReportingOutcomes = `# Reporting outcomes
 
@@ -327,6 +329,65 @@ func isClaudeFable51Model(model string) bool {
 	return false
 }
 
+func isClaudeOpus5Model(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	if slash := strings.LastIndexByte(model, '/'); slash >= 0 {
+		model = model[slash+1:]
+	}
+	return model == "claude-opus-5" || strings.HasPrefix(model, "claude-opus-5-")
+}
+
+func applyClaudeOpus5EnvelopeAfterPayload(payload []byte, oauth, isProbeOrHelper bool) []byte {
+	if !oauth || isProbeOrHelper || !isClaudeOpus5Model(gjson.GetBytes(payload, "model").String()) {
+		return payload
+	}
+	if !gjson.GetBytes(payload, "thinking").Exists() {
+		payload, _ = sjson.SetRawBytes(payload, "thinking", []byte(`{"type":"adaptive","display":"omitted"}`))
+		if !gjson.GetBytes(payload, "output_config.effort").Exists() {
+			payload, _ = sjson.SetBytes(payload, "output_config.effort", "high")
+		}
+	}
+
+	var system []json.RawMessage
+	if err := json.Unmarshal([]byte(gjson.GetBytes(payload, "system").Raw), &system); err != nil {
+		return payload
+	}
+	hasSDKPrefix := false
+	for i := range system {
+		text := gjson.GetBytes(system[i], "text").String()
+		switch {
+		case strings.HasPrefix(text, "x-anthropic-billing-header:"):
+			text = strings.Replace(text, "cc_entrypoint=cli;", "cc_entrypoint=sdk-cli;", 1)
+			system[i], _ = sjson.SetBytes(system[i], "text", text)
+		case text == claudeCodeCLIIdentity:
+			system[i], _ = sjson.SetBytes(system[i], "text", claudeAgentSDKIdentity)
+		case text == claudeAgentSDKSystemPrefix:
+			hasSDKPrefix = true
+		}
+	}
+	if !hasSDKPrefix {
+		system = append(system, json.RawMessage(buildTextBlock(claudeAgentSDKSystemPrefix, nil)))
+	}
+	if encoded, err := json.Marshal(system); err == nil {
+		payload, _ = sjson.SetRawBytes(payload, "system", encoded)
+	}
+	return payload
+}
+
+func hasClaudeAgentSDKEnvelope(payload []byte) bool {
+	hasIdentity := false
+	hasPrefix := false
+	for _, block := range gjson.GetBytes(payload, "system").Array() {
+		switch block.Get("text").String() {
+		case claudeAgentSDKIdentity:
+			hasIdentity = true
+		case claudeAgentSDKSystemPrefix:
+			hasPrefix = true
+		}
+	}
+	return hasIdentity && hasPrefix
+}
+
 func checkSystemInstructionsWithSigningModeAt(
 	payload []byte,
 	strictMode bool,
@@ -338,13 +399,13 @@ func checkSystemInstructionsWithSigningModeAt(
 ) []byte {
 	system := gjson.GetBytes(payload, "system")
 	messageText := claudeBillingFingerprintMessageText(payload)
+	model := strings.ToLower(strings.TrimSpace(gjson.GetBytes(payload, "model").String()))
 
 	billingText := generateBillingHeader(cchSigning, version, messageText, entrypoint, workload, isSubagent, prevReq, promptID)
 	billingBlock := buildTextBlock(billingText, nil)
 	agentBlock := buildTextBlock(claudeCodeCLIIdentity, &claudeCodeCacheControl)
 
 	systemBlocks := []string{billingBlock, agentBlock}
-	model := strings.ToLower(strings.TrimSpace(gjson.GetBytes(payload, "model").String()))
 	if isClaudeFable51Model(model) && !helps.IsClaudeProbeOrHelperRequest(payload) {
 		systemBlocks = append(systemBlocks, buildTextBlock(claudeCodeFableReportingOutcomes, nil))
 	}
@@ -1405,12 +1466,13 @@ func applyCloakingInternal(
 		}
 	}
 
+	entrypoint := "cli"
 	payload = checkSystemInstructionsWithSigningModeAt(
 		payload,
 		settings.strictMode,
 		cchSigning,
 		billingVersion,
-		"cli",
+		entrypoint,
 		workload,
 		claudeCodeCurrentTime(cfg, auth),
 		isSubagent,

@@ -862,6 +862,233 @@ func TestClaudeExecutor_NonClaudeRequestUsesClaudeCode220CLIFingerprint(t *testi
 	}
 }
 
+func TestApplyClaudeOpus5EnvelopeUsesAgentSDKEnvelope(t *testing.T) {
+	payload := []byte(`{"model":"claude-opus-5","system":"Hermes operator prompt","messages":[{"role":"user","content":"hello"}]}`)
+	body := checkSystemInstructionsWithSigningModeAt(
+		payload,
+		false,
+		false,
+		"2.1.272",
+		"cli",
+		"",
+		time.Date(2026, time.September, 16, 0, 0, 0, 0, time.UTC),
+		false,
+		"",
+		"",
+	)
+	body = applyClaudeOpus5EnvelopeAfterPayload(body, true, false)
+
+	system := gjson.GetBytes(body, "system").Array()
+	if len(system) != 3 {
+		t.Fatalf("system block count = %d, want 3: %s", len(system), body)
+	}
+	if got := system[0].Get("text").String(); !strings.Contains(got, "cc_entrypoint=sdk-cli;") {
+		t.Fatalf("billing header = %q, want sdk-cli entrypoint", got)
+	}
+	if got := system[1].Get("text").String(); got != "You are a Claude agent, built on Anthropic's Claude Agent SDK." {
+		t.Fatalf("system[1].text = %q, want Agent SDK identity", got)
+	}
+	if got := system[2].Get("text").String(); got != "\nYou are an interactive agent that helps users with software engineering tasks." {
+		t.Fatalf("system[2].text = %q, want Agent SDK system prefix", got)
+	}
+	if got := gjson.GetBytes(body, "messages.1.role").String(); got != "system" {
+		t.Fatalf("messages.1.role = %q, want relocated system message", got)
+	}
+	if got := gjson.GetBytes(body, "messages.1.content.0.text").String(); got != "Hermes operator prompt" {
+		t.Fatalf("relocated system prompt = %q, want preserved Hermes prompt", got)
+	}
+}
+
+func TestApplyCloakingOpus5AddsNativeThinkingDefaults(t *testing.T) {
+	auth := &cliproxyauth.Auth{
+		Metadata: claudeOAuthTestMetadata(),
+		Attributes: map[string]string{
+			"api_key": "sk-ant-oat01-test-defaults",
+		},
+	}
+	payload := []byte(`{"model":"claude-opus-5","messages":[{"role":"user","content":"hello"}]}`)
+	body, cloaked, errCloak := applyCloakingInternal(
+		context.Background(),
+		&config.Config{},
+		auth,
+		payload,
+		"sk-ant-oat01-test-defaults",
+		false,
+		true,
+		false,
+	)
+	if errCloak != nil {
+		t.Fatalf("applyCloakingInternal() error = %v", errCloak)
+	}
+	if !cloaked {
+		t.Fatal("applyCloakingInternal() cloaked = false, want true")
+	}
+	body = applyClaudeOpus5EnvelopeAfterPayload(body, true, false)
+	if got := gjson.GetBytes(body, "thinking.type").String(); got != "adaptive" {
+		t.Fatalf("thinking.type = %q, want adaptive", got)
+	}
+	if got := gjson.GetBytes(body, "output_config.effort").String(); got != "high" {
+		t.Fatalf("output_config.effort = %q, want high", got)
+	}
+	body, injected := injectClaudeCodeContextManagement(body)
+	if !injected || !gjson.GetBytes(body, "context_management").Exists() {
+		t.Fatalf("context_management was not injectable after Opus 5 defaults: %s", body)
+	}
+}
+
+func TestApplyCloakingOpus5PreservesExplicitDisabledThinking(t *testing.T) {
+	auth := &cliproxyauth.Auth{
+		Metadata:   claudeOAuthTestMetadata(),
+		Attributes: map[string]string{"api_key": "sk-ant-oat01-test-disabled"},
+	}
+	payload := []byte(`{"model":"claude-opus-5","thinking":{"type":"disabled"},"messages":[{"role":"user","content":"hello"}]}`)
+	body, _, errCloak := applyCloakingInternal(
+		context.Background(), &config.Config{}, auth, payload,
+		"sk-ant-oat01-test-disabled", false, true, false,
+	)
+	if errCloak != nil {
+		t.Fatalf("applyCloakingInternal() error = %v", errCloak)
+	}
+	body = applyClaudeOpus5EnvelopeAfterPayload(body, true, false)
+	if got := gjson.GetBytes(body, "thinking.type").String(); got != "disabled" {
+		t.Fatalf("thinking.type = %q, want disabled", got)
+	}
+	if gjson.GetBytes(body, "output_config.effort").Exists() {
+		t.Fatalf("explicit disabled thinking gained effort: %s", body)
+	}
+}
+
+func TestApplyClaudeHeadersOpus5UsesAgentSDKEntrypoint(t *testing.T) {
+	req, errRequest := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages?beta=true", nil)
+	if errRequest != nil {
+		t.Fatal(errRequest)
+	}
+	auth := &cliproxyauth.Auth{
+		Metadata:   claudeOAuthTestMetadata(),
+		Attributes: map[string]string{"api_key": "sk-ant-oat01-test-header"},
+	}
+	cfg := &config.Config{ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
+		UserAgent: "claude-cli/2.1.272 (external, cli)",
+	}}
+	body := checkSystemInstructionsWithSigningModeAt(
+		[]byte(`{"model":"claude-opus-5","messages":[{"role":"user","content":"hello"}]}`),
+		false, false, "2.1.272", "cli", "", time.Now(), false, "", "",
+	)
+	body = applyClaudeOpus5EnvelopeAfterPayload(body, true, false)
+
+	if errHeaders := applyClaudeHeaders(req, auth, "sk-ant-oat01-test-header", true, nil, body, cfg, nil, false); errHeaders != nil {
+		t.Fatalf("applyClaudeHeaders() error = %v", errHeaders)
+	}
+	if got := req.Header.Get("User-Agent"); got != "claude-cli/2.1.272 (external, sdk-cli)" {
+		t.Fatalf("User-Agent = %q, want Opus 5 Agent SDK entrypoint", got)
+	}
+
+	unpromoted, _ := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages?beta=true", nil)
+	plainBody := []byte(`{"model":"claude-opus-5","messages":[{"role":"user","content":"hello"}]}`)
+	if errHeaders := applyClaudeHeaders(unpromoted, auth, "sk-ant-oat01-header-test", true, nil, plainBody, cfg, nil, false); errHeaders != nil {
+		t.Fatalf("applyClaudeHeaders(unpromoted) error = %v", errHeaders)
+	}
+	if got := unpromoted.Header.Get("User-Agent"); got != "claude-cli/2.1.272 (external, cli)" {
+		t.Fatalf("unpromoted User-Agent = %q, want CLI entrypoint", got)
+	}
+}
+
+func TestClaudeExecutor_Opus5EnvelopeFollowsPayloadRewrittenModel(t *testing.T) {
+	t.Run("execute opus to sonnet", func(t *testing.T) {
+		var seenBody []byte
+		var seenHeaders http.Header
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			seenBody, _ = io.ReadAll(r.Body)
+			seenHeaders = r.Header.Clone()
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-sonnet-5","role":"assistant","content":[{"type":"text","text":"ok"}]}`))
+		}))
+		defer server.Close()
+
+		cfg := &config.Config{Payload: config.PayloadConfig{Override: []config.PayloadRule{{
+			Models: []config.PayloadModelRule{{Name: "claude-opus-5"}},
+			Params: map[string]any{"model": "claude-sonnet-5"},
+		}}}}
+		auth := &cliproxyauth.Auth{
+			Metadata: claudeOAuthTestMetadata(),
+			Attributes: map[string]string{"api_key": "sk-ant-oat01-rewrite-away", "base_url": server.URL},
+		}
+		_, errExecute := NewClaudeExecutor(cfg).Execute(context.Background(), auth, cliproxyexecutor.Request{
+			Model:   "claude-opus-5",
+			Payload: []byte(`{"model":"claude-opus-5","messages":[{"role":"user","content":"hello"}]}`),
+		}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
+		if errExecute != nil {
+			t.Fatalf("Execute() error = %v", errExecute)
+		}
+		if got := gjson.GetBytes(seenBody, "model").String(); got != "claude-sonnet-5" {
+			t.Fatalf("model = %q, want claude-sonnet-5", got)
+		}
+		if got := gjson.GetBytes(seenBody, "system.1.text").String(); got != claudeCodeCLIIdentity {
+			t.Fatalf("system.1.text = %q, want CLI identity", got)
+		}
+		if gjson.GetBytes(seenBody, "system.2").Exists() {
+			t.Fatalf("rewritten Sonnet request retained SDK system block: %s", seenBody)
+		}
+		if got := seenHeaders.Get("User-Agent"); strings.Contains(got, "sdk-cli") {
+			t.Fatalf("rewritten Sonnet User-Agent = %q, want CLI", got)
+		}
+		if gjson.GetBytes(seenBody, "thinking").Exists() || gjson.GetBytes(seenBody, "output_config.effort").Exists() {
+			t.Fatalf("rewritten Sonnet request retained Opus defaults: %s", seenBody)
+		}
+	})
+
+	t.Run("stream sonnet to opus", func(t *testing.T) {
+		var seenBody []byte
+		var seenHeaders http.Header
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			seenBody, _ = io.ReadAll(r.Body)
+			seenHeaders = r.Header.Clone()
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
+		}))
+		defer server.Close()
+
+		cfg := &config.Config{Payload: config.PayloadConfig{Override: []config.PayloadRule{{
+			Models: []config.PayloadModelRule{{Name: "claude-sonnet-5"}},
+			Params: map[string]any{"model": "claude-opus-5"},
+		}}}}
+		auth := &cliproxyauth.Auth{
+			Metadata: claudeOAuthTestMetadata(),
+			Attributes: map[string]string{"api_key": "sk-ant-oat01-rewrite-to", "base_url": server.URL},
+		}
+		result, errStream := NewClaudeExecutor(cfg).ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+			Model:   "claude-sonnet-5",
+			Payload: []byte(`{"model":"claude-sonnet-5","messages":[{"role":"user","content":"hello"}],"stream":true}`),
+		}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
+		if errStream != nil {
+			t.Fatalf("ExecuteStream() error = %v", errStream)
+		}
+		for chunk := range result.Chunks {
+			if chunk.Err != nil {
+				t.Fatalf("stream chunk error = %v", chunk.Err)
+			}
+		}
+		if got := gjson.GetBytes(seenBody, "model").String(); got != "claude-opus-5" {
+			t.Fatalf("model = %q, want claude-opus-5", got)
+		}
+		if got := gjson.GetBytes(seenBody, "system.1.text").String(); got != claudeAgentSDKIdentity {
+			t.Fatalf("system.1.text = %q, want Agent SDK identity", got)
+		}
+		if got := gjson.GetBytes(seenBody, "system.2.text").String(); got != claudeAgentSDKSystemPrefix {
+			t.Fatalf("system.2.text = %q, want Agent SDK system prefix", got)
+		}
+		if got := seenHeaders.Get("User-Agent"); !strings.Contains(got, "sdk-cli") {
+			t.Fatalf("rewritten Opus User-Agent = %q, want sdk-cli", got)
+		}
+		if got := gjson.GetBytes(seenBody, "thinking.type").String(); got != "adaptive" {
+			t.Fatalf("thinking.type = %q, want adaptive", got)
+		}
+		if got := gjson.GetBytes(seenBody, "output_config.effort").String(); got != "high" {
+			t.Fatalf("output_config.effort = %q, want high", got)
+		}
+	})
+}
+
 func TestClaudeExecutor_ConfirmedClaudeCodeRequestPreservesInteractiveIdentity(t *testing.T) {
 	var seenBody []byte
 	var seenHeaders http.Header
@@ -7614,18 +7841,21 @@ func TestClaudeExecutor_ExecuteOAuthCustomToolMCPAliasRoundTrip(t *testing.T) {
 	if _, ok := claudeBillingCCHDigitsOffset(upstreamBody); !ok {
 		t.Fatalf("Claude OAuth custom BaseURL body is missing CCH: %s", upstreamBody)
 	}
-	if got := upstreamHeaders.Get("User-Agent"); got != "claude-cli/2.1.258 (external, cli)" {
-		t.Fatalf("Messages User-Agent = %q, want CLI identity", got)
+	if got := upstreamHeaders.Get("User-Agent"); got != "claude-cli/2.1.258 (external, sdk-cli)" {
+		t.Fatalf("Messages User-Agent = %q, want Agent SDK identity", got)
 	}
-	wantBetas := claudeCodeCLIBetas(payload, nil, true)
+	wantBetas := claudeCodeCLIBetas(upstreamBody, nil, true)
 	if got := upstreamHeaders.Get("Anthropic-Beta"); got != wantBetas {
 		t.Fatalf("Messages Anthropic-Beta = %q, want %q", got, wantBetas)
 	}
-	if got := gjson.GetBytes(upstreamBody, "system.1.text").String(); got != claudeCodeCLIIdentity {
-		t.Fatalf("Messages system.1.text = %q, want official CLI identity", got)
+	if got := gjson.GetBytes(upstreamBody, "system.1.text").String(); got != claudeAgentSDKIdentity {
+		t.Fatalf("Messages system.1.text = %q, want Agent SDK identity", got)
 	}
-	if got := gjson.GetBytes(upstreamBody, "system.#").Int(); got != 2 {
-		t.Fatalf("Messages top-level system block count = %d, want 2", got)
+	if got := gjson.GetBytes(upstreamBody, "system.2.text").String(); got != claudeAgentSDKSystemPrefix {
+		t.Fatalf("Messages system.2.text = %q, want Agent SDK system prefix", got)
+	}
+	if got := gjson.GetBytes(upstreamBody, "system.#").Int(); got != 3 {
+		t.Fatalf("Messages top-level system block count = %d, want 3", got)
 	}
 	content := gjson.GetBytes(upstreamBody, "messages.0.content").Array()
 	if len(content) != 2 {
@@ -7691,18 +7921,21 @@ func TestClaudeExecutor_ExecuteStreamOAuthCustomToolMCPAliasRoundTrip(t *testing
 	if _, ok := claudeBillingCCHDigitsOffset(upstreamBody); !ok {
 		t.Fatalf("streaming Claude OAuth custom BaseURL body is missing CCH: %s", upstreamBody)
 	}
-	if got := upstreamHeaders.Get("User-Agent"); got != "claude-cli/2.1.258 (external, cli)" {
-		t.Fatalf("streaming User-Agent = %q, want CLI identity", got)
+	if got := upstreamHeaders.Get("User-Agent"); got != "claude-cli/2.1.258 (external, sdk-cli)" {
+		t.Fatalf("streaming User-Agent = %q, want Agent SDK identity", got)
 	}
-	wantBetas := claudeCodeCLIBetas(payload, nil, true)
+	wantBetas := claudeCodeCLIBetas(upstreamBody, nil, true)
 	if got := upstreamHeaders.Get("Anthropic-Beta"); got != wantBetas {
 		t.Fatalf("streaming Anthropic-Beta = %q, want %q", got, wantBetas)
 	}
-	if got := gjson.GetBytes(upstreamBody, "system.1.text").String(); got != claudeCodeCLIIdentity {
-		t.Fatalf("streaming system.1.text = %q, want official CLI identity", got)
+	if got := gjson.GetBytes(upstreamBody, "system.1.text").String(); got != claudeAgentSDKIdentity {
+		t.Fatalf("streaming system.1.text = %q, want Agent SDK identity", got)
 	}
-	if got := gjson.GetBytes(upstreamBody, "system.#").Int(); got != 2 {
-		t.Fatalf("streaming top-level system block count = %d, want 2", got)
+	if got := gjson.GetBytes(upstreamBody, "system.2.text").String(); got != claudeAgentSDKSystemPrefix {
+		t.Fatalf("streaming system.2.text = %q, want Agent SDK system prefix", got)
+	}
+	if got := gjson.GetBytes(upstreamBody, "system.#").Int(); got != 3 {
+		t.Fatalf("streaming top-level system block count = %d, want 3", got)
 	}
 	content := gjson.GetBytes(upstreamBody, "messages.0.content").Array()
 	if len(content) != 2 {
