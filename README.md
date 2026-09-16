@@ -126,6 +126,16 @@ PackyCode provides special discounts for our software users: register using <a h
 
 CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 
+### Claude Opus 5 with Claude OAuth
+
+This fork applies the native Claude Agent SDK request envelope when a non-native client requests `claude-opus-5` through a Claude OAuth credential. Text, streaming, and tool calls continue to use the normal OpenAI- or Anthropic-compatible endpoints.
+
+1. Build this fork (`docker build -t cliproxyapi-opus5 .` or `go build -o CLIProxyAPI ./cmd/server`).
+2. Add a Claude OAuth account through the existing CLIProxyAPI login flow.
+3. Request model `claude-opus-5` from your client.
+
+No ATIS value, extra proxy, Claude Code subprocess, or custom request headers are required. API-key credentials and other Claude models keep their existing request shape.
+
 ## Management API
 
 see [MANAGEMENT_API.md](https://help.router-for.me/management/api)

@@ -87,7 +87,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 
 	// Apply cloaking (system prompt injection, fake user ID, sensitive word obfuscation)
 	// based on client type and configuration.
-	_, wireSettings := resolveClaudeWirePolicy(e.cfg, auth, apiKey, confirmedClaudeCode)
+	wirePolicy, wireSettings := resolveClaudeWirePolicy(e.cfg, auth, apiKey, confirmedClaudeCode)
 	bodyBeforeCloaking := body
 	isProbeOrHelper := helps.IsClaudeProbeOrHelperRequest(bodyBeforeCloaking)
 	var cloaked bool
@@ -186,6 +186,10 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 				}
 			}
 		}
+	}
+	body = applyClaudeOpus5EnvelopeAfterPayload(body, wirePolicy.OAuth && cloaked, isProbeOrHelper)
+	if contextManagementState.eligible && !contextManagementState.callerOwned && !contextManagementState.automaticallyInjected && !contextManagementState.payloadRuleTouched {
+		body, contextManagementState.automaticallyInjected = injectClaudeCodeContextManagement(body)
 	}
 	body = reconcileClaudeCodeFableModelAfterPayload(
 		body,
