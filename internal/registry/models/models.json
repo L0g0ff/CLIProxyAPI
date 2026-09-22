@@ -162,6 +162,37 @@
       ]
     },
     {
+      "id": "claude-opus-5-5",
+      "native_capabilities": {
+        "web_search": true
+      },
+      "object": "model",
+      "created": 1790035200,
+      "owned_by": "anthropic",
+      "type": "claude",
+      "display_name": "Claude Opus 5.5",
+      "description": "Anthropic model for long-running agentic coding and knowledge work",
+      "context_length": 1000000,
+      "max_completion_tokens": 128000,
+      "thinking": {
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
       "id": "claude-opus-5",
       "native_capabilities": {
         "web_search": true
