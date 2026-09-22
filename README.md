@@ -126,15 +126,72 @@ PackyCode provides special discounts for our software users: register using <a h
 
 CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 
-### Claude Opus 5 with Claude OAuth
+### Claude Opus 5.5 with Claude OAuth
 
-This fork applies the native Claude Agent SDK request envelope when a non-native client requests `claude-opus-5` through a Claude OAuth credential. Text, streaming, and tool calls continue to use the normal OpenAI- or Anthropic-compatible endpoints.
+This fork supports `claude-opus-5-5` through a Claude subscription and exposes it through the normal OpenAI- and Anthropic-compatible endpoints. The setup below keeps both the proxy and its OAuth callback bound to localhost.
 
-1. Build this fork (`docker build -t cliproxyapi-opus5 .` or `go build -o CLIProxyAPI ./cmd/server`).
-2. Add a Claude OAuth account through the existing CLIProxyAPI login flow.
-3. Request model `claude-opus-5` from your client.
+#### Build and configure
 
-No ATIS value, extra proxy, Claude Code subprocess, or custom request headers are required. API-key credentials and other Claude models keep their existing request shape.
+```bash
+git clone https://github.com/L0g0ff/CLIProxyAPI.git
+cd CLIProxyAPI
+docker build -t cliproxyapi-opus55 .
+mkdir -p auths
+chmod 700 auths
+openssl rand -hex 32
+```
+
+Put the generated value in `config.yaml` as the proxy API key:
+
+```yaml
+host: "0.0.0.0"
+port: 8317
+auth-dir: "/auths"
+api-keys:
+  - "REPLACE_WITH_THE_GENERATED_KEY"
+claude-header-defaults:
+  user-agent: "claude-cli/2.1.280 (external, cli)"
+```
+
+The proxy API key protects the local endpoint. Claude access uses a separate OAuth login tied to the user's own Claude subscription.
+
+#### Authorize Claude
+
+```bash
+docker run --rm -it \
+  -p 127.0.0.1:54545:54545 \
+  -v "$PWD/config.yaml:/CLIProxyAPI/config.yaml:ro" \
+  -v "$PWD/auths:/auths" \
+  cliproxyapi-opus55 ./CLIProxyAPI --claude-login --no-browser
+```
+
+Open the printed Anthropic URL and complete the login. For a remote server, first open an SSH tunnel from the computer running the browser:
+
+```bash
+ssh -L 54545:127.0.0.1:54545 user@server
+```
+
+OAuth credentials are written to `auths/`. They contain sensitive tokens: never commit, copy into an image, or share this directory.
+
+#### Start and verify
+
+```bash
+docker run -d --name cliproxyapi-opus55 \
+  --restart unless-stopped \
+  -p 127.0.0.1:8317:8317 \
+  -v "$PWD/config.yaml:/CLIProxyAPI/config.yaml:ro" \
+  -v "$PWD/auths:/auths" \
+  cliproxyapi-opus55 ./CLIProxyAPI --local-model
+
+export PROXY_API_KEY="REPLACE_WITH_THE_GENERATED_KEY"
+curl -s http://127.0.0.1:8317/v1/messages \
+  -H "Authorization: Bearer $PROXY_API_KEY" \
+  -H "Content-Type: application/json" \
+  -H "anthropic-version: 2023-06-01" \
+  -d '{"model":"claude-opus-5-5","max_tokens":64,"messages":[{"role":"user","content":"Reply exactly OPUS55-OK"}]}'
+```
+
+A successful response contains `"model":"claude-opus-5-5"` and the text `OPUS55-OK`. `--local-model` is currently required because the upstream remote model catalog does not yet include Opus 5.5 and would otherwise replace the embedded catalog.
 
 ## Management API
 
